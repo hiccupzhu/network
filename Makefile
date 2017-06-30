@@ -2,7 +2,7 @@ CC = gcc -g
 
 
 dos:dos.o
-	$(CC) $+ -o $@
+	$(CC) $+ -lpthread -o $@
     
 
 dos.o:dos.c
